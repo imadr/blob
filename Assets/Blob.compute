@@ -1,0 +1,154 @@
+#define PI 3.1415926538
+
+struct Agent{
+    float2 position;
+    float rotation;
+};
+
+RWStructuredBuffer<Agent> agents;
+uint nb_agents;
+
+RWTexture2D<float4> output;
+RWTexture2D<float4> output_blurred;
+
+int width;
+int height;
+
+float delta_time;
+float move_speed;
+float diffusion_speed;
+float evaporation_speed;
+
+float sensor_dist;
+float sensor_size;
+float turn_speed;
+
+float dish_size;
+
+float2 center;
+
+uint hash(uint state){
+    state ^= 2747636419u;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    state ^= state >> 16;
+    state *= 2654435769u;
+    return state;
+}
+
+float sense(Agent agent, float sensor_angle){
+    sensor_angle += agent.rotation;
+    float2 sensor_dir = float2(cos(sensor_angle), sin(sensor_angle));
+    int2 sensor_pos = agent.position+sensor_dir*sensor_dist;
+
+    float sum = 0;
+    for(int i = -sensor_size; i < sensor_size; i++){
+        for(int j = -sensor_size; j < sensor_size; j++){
+            int2 pos = sensor_pos+int2(i, j);
+            sum += output[pos].x;
+        }
+    }
+    return sum;
+}
+
+#pragma kernel Update
+[numthreads(64, 1, 1)]
+void Update(uint3 id : SV_DispatchThreadID){
+    if(id.x >= nb_agents) return;
+
+    Agent agent = agents[id.x];
+    float rand = hash(hash(id.x)+agent.position.x*height+agent.position.y*width)/4294967295.0;
+
+    float sense_forward = sense(agent, 0);
+    float sense_left = sense(agent, PI/4);
+    float sense_right = sense(agent, -PI/4);
+
+    if(sense_forward < sense_left && sense_forward < sense_right){
+        agent.rotation += (rand-0.5)*2*turn_speed;
+    }
+    if(sense_right > sense_left){
+        agent.rotation -= rand*turn_speed*delta_time;
+    }
+    else if(sense_left > sense_right){
+        agent.rotation += rand*turn_speed*delta_time;
+    }
+
+    float2 direction = float2(cos(agent.rotation), sin(agent.rotation));
+    float2 new_pos = agent.position+direction*move_speed*delta_time;
+    if(new_pos.x < 0 || new_pos.x >= (float)width || new_pos.y < 0 || new_pos.y >= (float)height){
+        new_pos.x = min(width-1, max(0, new_pos.x));
+        new_pos.y = min(height-1, max(0, new_pos.y));
+        agents[id.x].rotation = rand*2*PI;
+    }
+    if(distance(new_pos, center) >= dish_size){
+        agents[id.x].rotation = rand*2*PI;
+    }
+    agents[id.x].position = new_pos;
+    output[int2(agent.position)] = 1;
+}
+
+#pragma kernel Trail
+[numthreads(8, 8, 1)]
+void Trail(uint3 id : SV_DispatchThreadID){
+    if(id.x >= (uint)width || id.y >= (uint)height){
+        return;
+    }
+
+    if(distance(id.xy, center) >= dish_size){
+        output[id.xy] = 0;
+        return;
+    }
+
+    float original = output[id.xy].x;
+    float sum = 0;
+    for(int offset_x = -1; offset_x <= 1; offset_x++){
+        for(int offset_y = -1; offset_y <= 1; offset_y++){
+            int sample_x = id.x+offset_x;
+            int sample_y = id.y+offset_y;
+            if(sample_x >= 0 && sample_x < width && sample_y >= 0 && sample_y < height){
+                sum += output[int2(sample_x, sample_y)].x;
+            }
+        }
+    }
+    float blur = sum/9;
+    float diffuse = lerp(original, blur, diffusion_speed*delta_time);
+    float evaporate = max(0, diffuse-evaporation_speed*delta_time);
+    output[id.xy] = evaporate;
+}
+
+#pragma kernel Blur
+[numthreads(8, 8, 1)]
+void Blur(uint3 id : SV_DispatchThreadID){
+    if(id.x >= (uint)width || id.y >= (uint)height){
+        return;
+    }
+
+    float4 color = float4(0, 0, 0, 0);
+    color += output[id.xy+int2(-2,-2)]*0.0285372061429822;
+    color += output[id.xy+int2(-2,-1)]*0.036277899061812904;
+    color += output[id.xy+int2(-2,0)]*0.03929937889607942;
+    color += output[id.xy+int2(-2,1)]*0.036277899061812904;
+    color += output[id.xy+int2(-2,2)]*0.0285372061429822;
+    color += output[id.xy+int2(-1,-2)]*0.036277899061812904;
+    color += output[id.xy+int2(-1,-1)]*0.04611824835777533;
+    color += output[id.xy+int2(-1,0)]*0.0499593020297999;
+    color += output[id.xy+int2(-1,1)]*0.04611824835777533;
+    color += output[id.xy+int2(-1,2)]*0.036277899061812904;
+    color += output[id.xy+int2(0,-2)]*0.03929937889607942;
+    color += output[id.xy+int2(0,-1)]*0.0499593020297999;
+    color += output[id.xy+int2(0,0)]*0.054120265798949546;
+    color += output[id.xy+int2(0,1)]*0.0499593020297999;
+    color += output[id.xy+int2(0,2)]*0.03929937889607942;
+    color += output[id.xy+int2(1,-2)]*0.036277899061812904;
+    color += output[id.xy+int2(1,-1)]*0.04611824835777533;
+    color += output[id.xy+int2(1,0)]*0.0499593020297999;
+    color += output[id.xy+int2(1,1)]*0.04611824835777533;
+    color += output[id.xy+int2(1,2)]*0.036277899061812904;
+    color += output[id.xy+int2(2,-2)]*0.0285372061429822;
+    color += output[id.xy+int2(2,-1)]*0.036277899061812904;
+    color += output[id.xy+int2(2,0)]*0.03929937889607942;
+    color += output[id.xy+int2(2,1)]*0.036277899061812904;
+    color += output[id.xy+int2(2,2)]*0.0285372061429822;
+    output_blurred[id.xy] = color;
+}
